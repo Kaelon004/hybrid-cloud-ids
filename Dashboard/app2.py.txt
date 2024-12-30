@@ -1,0 +1,195 @@
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS 
+from datetime import datetime
+from collections import deque
+import logging
+import threading
+import json
+
+# Added colorama for console color output
+from colorama import init, Fore, Style
+
+# Initialize colorama for cross-platform color support
+init(autoreset=True)
+
+# Flask app setup
+app = Flask(__name__)
+CORS(app, resources={  # Enable CORS for all routes
+    r"/api/*": {
+        "origins": "*",
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": True
+    }
+})
+
+# Configure logging
+logging.basicConfig(
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Alerts storage with a maximum of 500 recent alerts
+alerts = deque(maxlen=500)
+
+def console_alert(message, alert_type='info'):
+    """
+    Print alerts to console with color-coded output
+    
+    Args:
+        message (str): Alert message to display
+        alert_type (str): Type of alert (info, warning, error, attack)
+    """
+    if alert_type == 'warning':
+        print(f"{Fore.YELLOW}[WARNING] {message}{Style.RESET_ALL}")
+    elif alert_type == 'error':
+        print(f"{Fore.RED}[ERROR] {message}{Style.RESET_ALL}")
+    elif alert_type == 'attack':
+        print(f"{Fore.RED}[ATTACK ALERT] {message}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.GREEN}[INFO] {message}{Style.RESET_ALL}")
+
+@app.route('/api/alerts', methods=['GET'])
+def get_alerts():
+    try:
+        logging.info("API Call: Fetching all alerts.")
+        console_alert("Fetching all alerts via API")
+        return jsonify(list(alerts)), 200
+    except Exception as e:
+        error_msg = f"Error fetching alerts: {e}"
+        logging.error(error_msg)
+        console_alert(error_msg, 'error')
+        return jsonify({"error": "Failed to fetch alerts"}), 500
+
+@app.route('/api/add_alert', methods=['POST'])
+def add_alert():
+    try:
+        alert_data = request.get_json()
+        if not alert_data:
+            error_msg = "Empty payload received."
+            logging.warning(error_msg)
+            console_alert(error_msg, 'warning')
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        # Validate required fields
+        required_fields = ["source_ip", "destination_ip", "protocol", "severity", "message"]
+        if not all(field in alert_data for field in required_fields):
+            error_msg = "Invalid alert structure."
+            logging.warning(error_msg)
+            console_alert(error_msg, 'warning')
+            return jsonify({"error": "Invalid alert structure"}), 400
+
+        # Add timestamp
+        alert_data['timestamp'] = datetime.utcnow().isoformat()
+        alerts.append(alert_data)
+        
+        # Log and console alert
+        logging.info(f"Alert added: {alert_data}")
+        console_alert(
+            f"New {alert_data['severity']} Severity Alert: "
+            f"{alert_data['message']} from {alert_data['source_ip']}", 
+            'attack' if alert_data['severity'] == 'High' else 'warning'
+        )
+         
+        return jsonify({"message": "Alert added successfully"}), 201
+    except Exception as e:
+        error_msg = f"Error adding alert: {e}"
+        logging.error(error_msg)
+        console_alert(error_msg, 'error')
+        return jsonify({"error": "Failed to add alert"}), 500
+
+@app.route('/api/metrics', methods=['GET'])
+def get_metrics():
+    # Endpoint to retrieve resource usage and throughput
+    try:
+        metrics = {
+            "throughput": len(alerts) / (time.time() - app_start_time),
+            "resource_usage": {
+                "cpu": psutil.cpu_percent(),
+                "memory": psutil.virtual_memory().percent
+            }
+        }
+        return jsonify(metrics), 200
+    except Exception as e:
+        logging.error(f"Error fetching metrics: {e}")
+        return jsonify({"error": "Failed to fetch metrics"}), 500
+
+@app.route('/api/clear_alerts', methods=['POST'])
+def clear_alerts():
+    try:
+        alerts.clear()
+        logging.info("All alerts cleared.")
+        console_alert("All alerts cleared from dashboard", 'info')
+        return jsonify({"message": "All alerts cleared successfully"}), 200
+    except Exception as e:
+        error_msg = f"Error clearing alerts: {e}"
+        logging.error(error_msg)
+        console_alert(error_msg, 'error')
+        return jsonify({"error": "Failed to clear alerts"}), 500
+
+# Server-Sent Events for real-time updates
+@app.route('/api/stream_alerts')
+def stream_alerts():
+    def event_stream():
+        last_count = 0
+        while True:
+            if len(alerts) > last_count:
+                # Send only new alerts
+                new_alerts = list(alerts)[last_count:]
+                for alert in new_alerts:
+                    yield f"data: {json.dumps(alert)}\n\n"
+                last_count = len(alerts)
+            
+            # Use a library-specific sleep or threading.Event for efficiency
+            import time
+            time.sleep(1)
+    
+    return Response(
+        event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+
+# Background task to simulate incoming alerts (for testing purposes)
+def simulate_alerts():
+    import time
+    import random
+
+    while True:
+        time.sleep(random.randint(5, 10))  # Add random delay for testing
+        simulated_alert = {
+            "source_ip": f"192.168.1.{random.randint(1, 255)}",
+            "destination_ip": "192.168.1.100",
+            "protocol": random.choice(["TCP", "UDP", "ICMP"]),
+            "severity": random.choice(["Low", "Medium", "High"]),
+            "message": random.choice([
+                "Potential port scan detected",
+                "Unusual traffic pattern",
+                "Multiple failed login attempts"
+            ])
+        }
+        try:
+            with app.test_request_context():
+                add_alert()  # This will trigger our existing add_alert logic
+        except Exception as e:
+            print(f"Error in simulated alert: {e}")
+
+if __name__ == '__main__':
+    # Start the background simulation thread
+    console_alert("Starting NIDS Dashboard", 'info')
+    threading.Thread(target=simulate_alerts, daemon=True).start()
+
+    # Start the Flask app
+    console_alert("Dashboard running on http://127.0.0.1:5000", 'info')
+    app.run(debug=False)
+
+
+
+
+
+

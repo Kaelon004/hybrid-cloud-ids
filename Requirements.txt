@@ -1,0 +1,7 @@
+pyshark
+colorama
+flask
+flask-cors
+psutil
+requests
+watchdog

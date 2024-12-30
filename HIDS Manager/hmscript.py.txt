@@ -1,0 +1,203 @@
+import socket
+import json
+import requests
+import logging
+import threading
+import traceback
+from datetime import datetime
+
+# Enhanced logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('hids_manager_debug.log'),
+        logging.StreamHandler()  # Also print to console
+    ]
+)
+
+# Thread-safe event queue to handle multiple events
+class EventQueue:
+    def __init__(self):
+        self._queue = []
+        self._lock = threading.Lock()
+
+    def add_event(self, event):
+        with self._lock:
+            self._queue.append(event)
+
+    def get_events(self):
+        with self._lock:
+            events = self._queue.copy()
+            self._queue.clear()
+            return events
+
+# Global event queue
+event_queue = EventQueue()
+
+class HIDSManager:
+    def __init__(self):
+        # Initialization remains unchanged...
+        threading.Thread(target=self.calculate_latency_and_throughput, daemon=True).start()
+
+    def calculate_latency_and_throughput(self):
+        while True:
+            events = event_queue.get_events()
+            for event in events:
+                try:
+                    sent_time = datetime.strptime(event.get("sent_time"), '%Y-%m-%d %H:%M:%S')
+                    received_time = datetime.strptime(event.get("received_time"), '%Y-%m-%d %H:%M:%S')
+                    latency = (received_time - sent_time).total_seconds()
+                    logging.info(f"Event Latency: {latency} seconds")
+                except Exception as e:
+                    logging.error(f"Error calculating latency: {e}")
+            time.sleep(1)
+
+    def process_events(self):
+        while True:
+            events = event_queue.get_events()
+            for event in events:
+                self.send_to_dashboard(event)
+
+    def send_to_dashboard(self, event):
+        try:
+            response = requests.post('http://127.0.0.1:5000/api/add_alert', json=event)
+            if response.status_code == 201:
+                logging.info(f"Successfully sent event to dashboard: {event}")
+            else:
+                logging.error(f"Failed to send event: {response.content}")
+        except Exception as e:
+            logging.error(f"Error sending event to dashboard: {e}")
+
+
+# Start the HIDS Manager to receive logs
+def start_hids_manager(host="0.0.0.0", port=9000):
+    logging.info(f"Starting HIDS Manager on {host}:{port}")
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    try:
+        server_socket.bind((host, port))
+        server_socket.listen(5)
+        logging.info(f"HIDS Manager listening on {host}:{port}")
+
+        # Start a thread to process events
+        threading.Thread(target=process_events, daemon=True).start()
+
+        while True:
+            try:
+                client_socket, client_address = server_socket.accept()
+                logging.debug(f"Accepted connection from {client_address}")
+                # Handle each client in a separate thread
+                threading.Thread(target=handle_client, args=(client_socket, client_address), daemon=True).start()
+            except Exception as e:
+                logging.error(f"Server connection error: {e}")
+                logging.error(traceback.format_exc())
+
+    except Exception as e:
+        logging.critical(f"Failed to start HIDS Manager: {e}")
+        logging.error(traceback.format_exc())
+    finally:
+        server_socket.close()
+
+# Handle incoming connections
+def handle_client(client_socket, client_address):
+    try:
+        logging.debug(f"Handling connection from {client_address}")
+        data = client_socket.recv(4096).decode("utf-8")
+        
+        if not data:
+            logging.warning(f"Empty data received from {client_address}")
+            return
+
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            logging.error(f"Invalid JSON received from {client_address}: {data}")
+            return
+
+        # Adding timestamps
+        event["received_time"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Log the event with timestamps
+        #log_message = (
+            #f"Event: {event.get('event', 'Unknown')} | "
+            #f"File: {event.get('file', 'Unknown')} | "
+            #f"Description: {event.get('description', 'No description')} | "
+            #f"Detected Time: {event.get('detected_time', 'Unknown')} | "
+            #f"Sent Time: {event.get('sent_time', 'Unknown')} | "
+            #f"Received Time: {event['received_time']}"
+        #)
+
+        logging.info(
+            f"Event: {event['event']} | Details: {event['details']} | "
+            f"Detected Time: {event['detected_time']} | Throughput: {event['throughput']} | "
+            f"Received Time: {event['received_time']}"
+        )
+ 
+        # Add event to the queue for further processing
+        event_queue.add_event(event)
+        send_to_dashboard(event)
+
+    except Exception as e:
+        logging.error(f"Client handling error from {client_address}: {e}")
+        logging.error(traceback.format_exc())
+    finally:
+        client_socket.close()
+
+def format_event_for_dashboard(event):
+    # Map HIDS Manager's event structure to dashboard's expected structure
+    return {
+        "source_ip": event.get("details", {}).get("ip", "Unknown"),
+        "destination_ip": "192.168.0.145",
+        "protocol": "TCP",
+        "severity": "Medium",
+        "message": f"Brute force detected: {event.get('details', {}).get('failed_attempts',0)} failed attempts",
+        "timestamp": event.get("detected_time", datetime.now().isoformat())
+    }
+
+
+def send_to_dashboard(event):
+    formatted_event = format_event_for_dashboard(event)
+    try:
+        response = requests.post(
+            "http://127.0.0.1:5000/api/add_alert",
+            json=formatted_event,
+            headers={"Content-Type": "application/json"}
+        )
+        if response.status_code == 201:
+            logging.info(f"Successfully sent event to dashboard: {event}")
+        else:
+            logging.error(f"Failed to send event to dashboard: {response.content}")
+    except Exception as e:
+        logging.error(f"Error sending event to dashboard: {e}")
+
+
+# Process events from the queue
+def process_events():
+    while True:
+        try:
+            events = event_queue.get_events()
+            if events:
+                for event in events:
+                    # Additional processing can be added here
+                    logging.debug(f"Processing queued event: {event}")
+            
+            # Sleep to prevent tight looping
+            threading.Event().wait(1)
+        except Exception as e:
+            logging.error(f"Error in event processing: {e}")
+            logging.error(traceback.format_exc())
+
+if __name__ == "__main__":
+    try:
+        start_hids_manager()
+    except KeyboardInterrupt:
+        logging.info("[INFO] HIDS Manager shutting down.")
+    except Exception as e:
+        logging.critical(f"Fatal error: {e}")
+        logging.error(traceback.format_exc())
+
+
+
+

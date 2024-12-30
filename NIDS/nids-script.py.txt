@@ -1,0 +1,171 @@
+import pyshark
+import logging
+import psutil
+import threading
+import requests
+from datetime import datetime
+
+# Added colorama for console color output
+from colorama import init, Fore, Style
+
+# Initialize colorama for cross-platform color support
+init(autoreset=True)
+
+# Configure logging
+logging.basicConfig(
+    filename='nids_alerts.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# monitoring system resource usage
+print("CPU Usage:", psutil.cpu_percent(interval=1))
+print("Memory Usage:", psutil.virtual_memory())
+
+# Interfaces to monitor
+INTERFACES = ['br-e90781564c42']
+
+# Alert rules (DoS, SYN Flood)
+ALERT_RULES = {
+    "SYN Flood": {
+        "protocol": "TCP",
+        "flag": "SYN",
+        "threshold": 50,
+        "alert_message": "Potential SYN Flood detected!"
+    },
+    "DoS": {
+        "protocol": "UDP",
+        "threshold": 100,
+        "alert_message": "Potential DoS attack detected!"
+    }
+}
+
+# API endpoint for sending alerts to the dashboard
+DASHBOARD_API = 'http://127.0.0.1:5000/api/add_alert'
+
+def console_alert(message, alert_type='info'):
+    """
+    Print alerts to console with color-coded output
+    
+    Args:
+        message (str): Alert message to display
+        alert_type (str): Type of alert (info, warning, error)
+    """
+    if alert_type == 'warning':
+        print(f"{Fore.YELLOW}[WARNING] {message}{Style.RESET_ALL}")
+    elif alert_type == 'error':
+        print(f"{Fore.RED}[CRITICAL] {message}{Style.RESET_ALL}")
+    elif alert_type == 'attack':
+        print(f"{Fore.RED}[ATTACK DETECTED] {message}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.GREEN}[INFO] {message}{Style.RESET_ALL}")
+
+def send_alert_to_dashboard(src_ip, dst_ip, protocol, alert_message, severity="High"):
+    """Send an alert to the dashboard via API."""
+    alert_data = {
+        'source_ip': src_ip,
+        'destination_ip': dst_ip,
+        'protocol': protocol,
+        'severity': severity,
+        'message': alert_message
+    }
+    try:
+        response = requests.post(DASHBOARD_API, json=alert_data)
+        if response.status_code == 201:
+            logging.info(f"Alert sent to dashboard: {alert_data}")
+            # Additional console logging
+            console_alert(f"Dashboard alert sent: {alert_message}", 'warning')
+        else:
+            logging.error(f"Failed to send alert to dashboard: {response.status_code}, {response.text}")
+            console_alert(f"Dashboard alert failed: {response.status_code}", 'error')
+    except Exception as e:
+        logging.error(f"Error sending alert to dashboard: {e}")
+        console_alert(f"Dashboard alert error: {e}", 'error')
+
+def monitor_interface(interface):
+    console_alert(f"Starting monitoring on interface: {interface}")
+    logging.info(f"Starting monitoring on interface: {interface}")
+
+    try:
+        capture = pyshark.LiveCapture(interface=interface)
+        packet_count = {}
+
+        for packet in capture.sniff_continuously():
+            try:
+                # Extract packet details
+                protocol = packet.transport_layer  # e.g., TCP, UDP
+                src_ip = packet.ip.src
+                dst_ip = packet.ip.dst
+                tcp_flags = packet.tcp.flags if protocol == "TCP" else None
+
+                # Initialize counters
+                if src_ip not in packet_count:
+                    packet_count[src_ip] = {}
+
+                if protocol not in packet_count[src_ip]:
+                    packet_count[src_ip][protocol] = 0
+
+                # Check for SYN Flood (TCP with SYN flag)
+                if protocol == "TCP" and tcp_flags and "SYN" in tcp_flags.upper():
+                    packet_count[src_ip][protocol] += 1
+                    if packet_count[src_ip][protocol] > ALERT_RULES["SYN Flood"]["threshold"]:
+                        alert_message = (
+                            f"{ALERT_RULES['SYN Flood']['alert_message']} "
+                            f"Source: {src_ip}, Destination: {dst_ip}, Count: {packet_count[src_ip][protocol]}"
+                        )
+                        logging.warning(alert_message)
+                        console_alert(alert_message, 'attack')
+                        send_alert_to_dashboard(src_ip, dst_ip, "TCP", alert_message)
+                        packet_count[src_ip][protocol] = 0
+
+                # Check for DoS (UDP high packet rate)
+                if protocol == "UDP":
+                    packet_count[src_ip][protocol] += 1
+                    if packet_count[src_ip][protocol] > ALERT_RULES["DoS"]["threshold"]:
+                        alert_message = (
+                            f"{ALERT_RULES['DoS']['alert_message']} "
+                            f"Source: {src_ip}, Destination: {dst_ip}, Rate: {packet_count[src_ip][protocol]}"
+                        )
+                        logging.warning(alert_message)
+                        console_alert(alert_message, 'attack')
+                        send_alert_to_dashboard(src_ip, dst_ip, "UDP", alert_message)
+                        packet_count[src_ip][protocol] = 0
+
+            except AttributeError:
+                # Skip packets that do not have the expected attributes
+                logging.debug("Packet missing expected attributes, skipping...")
+                continue
+
+    except Exception as e:
+        error_message = f"Error on interface {interface}: {e}"
+        logging.error(error_message)
+        console_alert(error_message, 'error')
+
+# Run the NIDS on all interfaces
+if __name__ == "__main__":
+    console_alert("Starting Network Intrusion Detection System (NIDS)...")
+    logging.info("Starting NIDS...")
+
+    threads = []
+    for iface in INTERFACES:
+        try:
+            thread = threading.Thread(target=monitor_interface, args=(iface,))
+            thread.start()
+            threads.append(thread)
+        except Exception as e:
+            error_message = f"Failed to start monitoring on interface {iface}: {e}"
+            logging.error(error_message)
+            console_alert(error_message, 'error')
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+
+    logging.info("NIDS stopped.")
+    console_alert("Network Intrusion Detection System (NIDS) stopped.", 'info')
+
+
+
+
+
